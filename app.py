@@ -17,6 +17,7 @@ HIDDEN_CHANNELS = 64
 DROPOUT = 0.2
 TRAIN_RATIO = 0.70
 VAL_RATIO = 0.15
+TIME_STEP_MINUTES = 5
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 MODEL_PATH = "stgcn_tuned_real_graph_model.pt"
@@ -219,27 +220,27 @@ def predict_single_window(model, input_window_scaled, adj_norm):
     return pred
 
 
+def recursive_forecast(model, base_window_scaled, adj_norm, steps_ahead):
+    history = base_window_scaled.copy()
+    preds = []
+
+    while len(preds) < steps_ahead:
+        pred_block = predict_single_window(model, history[-INPUT_LEN:], adj_norm)
+        block_len = min(OUTPUT_LEN, steps_ahead - len(preds))
+        use_block = pred_block[:block_len]
+        preds.append(use_block)
+        history = np.vstack([history, use_block])
+
+    preds = np.vstack(preds)
+    return preds[:steps_ahead]
+
+
 def create_forecast_plot(past_times, past_values, future_times, predicted_values, actual_values=None, title="Forecast"):
     fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=past_times,
-        y=past_values,
-        mode="lines+markers",
-        name="Past Input"
-    ))
-    fig.add_trace(go.Scatter(
-        x=future_times,
-        y=predicted_values,
-        mode="lines+markers",
-        name="Predicted"
-    ))
+    fig.add_trace(go.Scatter(x=past_times, y=past_values, mode="lines+markers", name="Past Input"))
+    fig.add_trace(go.Scatter(x=future_times, y=predicted_values, mode="lines+markers", name="Predicted"))
     if actual_values is not None:
-        fig.add_trace(go.Scatter(
-            x=future_times,
-            y=actual_values,
-            mode="lines+markers",
-            name="Actual"
-        ))
+        fig.add_trace(go.Scatter(x=future_times, y=actual_values, mode="lines+markers", name="Actual"))
     fig.update_layout(
         title=title,
         xaxis_title="Timestamp",
@@ -250,38 +251,10 @@ def create_forecast_plot(past_times, past_values, future_times, predicted_values
     return fig
 
 
-def create_history_plot(times, actual_series, title):
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=times,
-        y=actual_series,
-        mode="lines",
-        name="Actual History"
-    ))
-    fig.update_layout(
-        title=title,
-        xaxis_title="Timestamp",
-        yaxis_title="Traffic Speed / Flow",
-        template="plotly_white",
-        height=450
-    )
-    return fig
-
-
 def create_comparison_plot(times, actual_series, predicted_series, title):
     fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=times,
-        y=actual_series,
-        mode="lines",
-        name="Actual"
-    ))
-    fig.add_trace(go.Scatter(
-        x=times,
-        y=predicted_series,
-        mode="lines",
-        name="Predicted"
-    ))
+    fig.add_trace(go.Scatter(x=times, y=actual_series, mode="lines", name="Actual"))
+    fig.add_trace(go.Scatter(x=times, y=predicted_series, mode="lines", name="Predicted"))
     fig.update_layout(
         title=title,
         xaxis_title="Timestamp",
@@ -330,7 +303,6 @@ def prepare_data():
 
     X_test, y_test = make_sequences(test_scaled, input_len=INPUT_LEN, output_len=OUTPUT_LEN)
     adj_norm = normalize_adjacency(adj_mx)
-
     valid_prediction_timestamps = test_df.index[INPUT_LEN: len(test_df) - OUTPUT_LEN + 1]
 
     return {
@@ -373,7 +345,7 @@ try:
         stgcn_pred = run_inference_batch(model, data["X_test"], data["adj_norm"])
         stgcn_pred_inv = inverse_transform_3d(stgcn_pred, data["scaler"])
         stgcn_true_inv = inverse_transform_3d(data["y_test"], data["scaler"])
-        naive_pred_inv, naive_metrics = evaluate_naive_last_value(data["X_test"], data["y_test"], data["scaler"])
+        _, naive_metrics = evaluate_naive_last_value(data["X_test"], data["y_test"], data["scaler"])
         stgcn_metrics = compute_metrics(stgcn_true_inv, stgcn_pred_inv)
 
     c1, c2, c3, c4 = st.columns(4)
@@ -394,7 +366,7 @@ try:
     ])
     st.dataframe(results_df, use_container_width=True)
 
-    st.markdown("## Timestamp-Based Prediction")
+    st.markdown("## In-Dataset Timestamp Prediction")
 
     col_a, col_b, col_c = st.columns([1.2, 2.2, 1.2])
 
@@ -411,11 +383,7 @@ try:
         format_func=lambda x: pd.Timestamp(x).strftime("%Y-%m-%d %H:%M:%S")
     )
 
-    forecast_step = col_c.selectbox(
-        "Forecast Step",
-        options=[1, 2, 3],
-        index=0
-    )
+    forecast_step = col_c.selectbox("Forecast Step", options=[1, 2, 3], index=0)
 
     test_df = data["test_df"]
     test_scaled = data["test_scaled"]
@@ -440,37 +408,130 @@ try:
     selected_sensor_id = data["sensor_ids_str"][sensor_idx]
     target_timestamp = future_times[forecast_step - 1]
 
-    st.markdown("### Selected Prediction")
     p1, p2, p3, p4 = st.columns(4)
     p1.metric("Sensor ID", selected_sensor_id)
     p2.metric("Target Timestamp", pd.Timestamp(target_timestamp).strftime("%Y-%m-%d %H:%M:%S"))
     p3.metric("Predicted Speed", f"{selected_pred_value:.2f}")
     p4.metric("Actual Speed", f"{selected_actual_value:.2f}")
 
-    step_labels = [f"t+{i}" for i in range(1, OUTPUT_LEN + 1)]
     step_df = pd.DataFrame({
-        "Step": step_labels,
+        "Step": [f"t+{i}" for i in range(1, OUTPUT_LEN + 1)],
         "Timestamp": [pd.Timestamp(ts).strftime("%Y-%m-%d %H:%M:%S") for ts in future_times],
         "Predicted": single_pred_original[:, sensor_idx],
         "Actual": future_actual_original[:, sensor_idx]
     })
     st.dataframe(step_df, use_container_width=True)
 
-    past_sensor_values = input_window_original[:, sensor_idx]
-    pred_sensor_values = single_pred_original[:, sensor_idx]
-    actual_sensor_values = future_actual_original[:, sensor_idx]
-
     forecast_fig = create_forecast_plot(
         past_times=past_times,
-        past_values=past_sensor_values,
+        past_values=input_window_original[:, sensor_idx],
         future_times=future_times,
-        predicted_values=pred_sensor_values,
-        actual_values=actual_sensor_values,
-        title=f"Past Window + Forecast | Sensor {selected_sensor_id}"
+        predicted_values=single_pred_original[:, sensor_idx],
+        actual_values=future_actual_original[:, sensor_idx],
+        title=f"In-Dataset Forecast | Sensor {selected_sensor_id}"
     )
     st.plotly_chart(forecast_fig, use_container_width=True)
 
-    st.markdown("## Compare Model Over Time for Selected Sensor")
+    st.markdown("## Recursive Future Forecasting")
+
+    last_known_time = data["df"].index[-1]
+
+    f1, f2, f3 = st.columns([1.2, 1.2, 2.0])
+
+    recursive_sensor_idx = f1.selectbox(
+        "Select Sensor for Future Forecast",
+        options=list(range(data["num_nodes"])),
+        index=sensor_idx,
+        format_func=lambda x: f"{x} (Sensor ID: {data['sensor_ids_str'][x]})"
+    )
+
+    future_minutes = f2.number_input(
+        "Minutes into the future",
+        min_value=5,
+        max_value=180,
+        value=30,
+        step=5
+    )
+
+    base_mode = f3.radio(
+        "Forecast starting point",
+        options=["From latest known timestamp", "From selected in-dataset timestamp"],
+        horizontal=True
+    )
+
+    steps_ahead = int(future_minutes // TIME_STEP_MINUTES)
+    if steps_ahead < 1:
+        steps_ahead = 1
+
+    if base_mode == "From latest known timestamp":
+        base_end_pos = len(data["df"])
+        base_window_scaled = data["scaler"].transform(data["df"].iloc[base_end_pos - INPUT_LEN:base_end_pos].values)
+        base_window_original = data["df"].iloc[base_end_pos - INPUT_LEN:base_end_pos].values
+        base_past_times = data["df"].index[base_end_pos - INPUT_LEN:base_end_pos]
+        future_start_time = data["df"].index[-1] + pd.Timedelta(minutes=TIME_STEP_MINUTES)
+        actual_future_values = None
+    else:
+        base_start_pos = test_df.index.get_loc(selected_timestamp)
+        base_window_scaled = test_scaled[base_start_pos - INPUT_LEN:base_start_pos]
+        base_window_original = test_df.iloc[base_start_pos - INPUT_LEN:base_start_pos].values
+        base_past_times = test_df.index[base_start_pos - INPUT_LEN:base_start_pos]
+        future_start_time = selected_timestamp
+        compare_end = base_start_pos + steps_ahead
+        if compare_end <= len(test_df):
+            actual_future_values = test_df.iloc[base_start_pos:compare_end].values
+        else:
+            actual_future_values = None
+
+    recursive_pred_scaled = recursive_forecast(
+        model=model,
+        base_window_scaled=base_window_scaled,
+        adj_norm=data["adj_norm"],
+        steps_ahead=steps_ahead
+    )
+
+    recursive_pred_original = inverse_transform_2d(recursive_pred_scaled, data["scaler"])
+
+    recursive_future_times = pd.date_range(
+        start=future_start_time,
+        periods=steps_ahead,
+        freq=f"{TIME_STEP_MINUTES}min"
+    )
+
+    final_pred_value = float(recursive_pred_original[-1, recursive_sensor_idx])
+    final_pred_time = recursive_future_times[-1]
+    recursive_sensor_id = data["sensor_ids_str"][recursive_sensor_idx]
+
+    st.write(f"Last known dataset timestamp: **{pd.Timestamp(last_known_time).strftime('%Y-%m-%d %H:%M:%S')}**")
+
+    r1, r2, r3, r4 = st.columns(4)
+    r1.metric("Sensor ID", recursive_sensor_id)
+    r2.metric("Forecast Horizon", f"{future_minutes} min")
+    r3.metric("Target Time", pd.Timestamp(final_pred_time).strftime("%Y-%m-%d %H:%M:%S"))
+    r4.metric("Predicted Speed", f"{final_pred_value:.2f}")
+
+    recursive_df = pd.DataFrame({
+        "Timestamp": [pd.Timestamp(ts).strftime("%Y-%m-%d %H:%M:%S") for ts in recursive_future_times],
+        "Predicted": recursive_pred_original[:, recursive_sensor_idx]
+    })
+
+    if actual_future_values is not None and len(actual_future_values) >= steps_ahead:
+        recursive_df["Actual"] = actual_future_values[:steps_ahead, recursive_sensor_idx]
+
+    st.dataframe(recursive_df, use_container_width=True)
+
+    recursive_fig = create_forecast_plot(
+        past_times=base_past_times,
+        past_values=base_window_original[:, recursive_sensor_idx],
+        future_times=recursive_future_times,
+        predicted_values=recursive_pred_original[:, recursive_sensor_idx],
+        actual_values=actual_future_values[:steps_ahead, recursive_sensor_idx] if actual_future_values is not None and len(actual_future_values) >= steps_ahead else None,
+        title=f"Recursive Future Forecast | Sensor {recursive_sensor_id}"
+    )
+    st.plotly_chart(recursive_fig, use_container_width=True)
+
+    st.caption("Recursive forecasting uses the model's own earlier predictions as input for later predictions. Accuracy usually decreases as the forecast horizon gets longer.")
+
+    st.markdown("## One-Step Comparison Over Time")
 
     compare_points = st.slider(
         "Number of test timestamps to compare",
@@ -487,28 +548,10 @@ try:
         times=compare_times,
         actual_series=actual_series,
         predicted_series=predicted_series,
-        title=f"One-Step Prediction Comparison Over Time | Sensor {selected_sensor_id}"
+        title=f"One-Step Prediction Comparison | Sensor {selected_sensor_id}"
     )
     st.plotly_chart(compare_fig, use_container_width=True)
 
-    st.markdown("## Sensor History")
-    history_points = st.slider(
-        "Number of historical points to show",
-        min_value=30,
-        max_value=min(500, len(test_df)),
-        value=min(150, len(test_df))
-    )
-    history_times = test_df.index[:history_points]
-    history_values = test_df.iloc[:history_points, sensor_idx].values
-
-    history_fig = create_history_plot(
-        times=history_times,
-        actual_series=history_values,
-        title=f"Historical Traffic Series | Sensor {selected_sensor_id}"
-    )
-    st.plotly_chart(history_fig, use_container_width=True)
-
-    st.markdown("## Download Results")
     metrics_csv = results_df.to_csv(index=False).encode("utf-8")
     st.download_button(
         label="Download metrics as CSV",
@@ -517,11 +560,11 @@ try:
         mime="text/csv"
     )
 
-    step_csv = step_df.to_csv(index=False).encode("utf-8")
+    recursive_csv = recursive_df.to_csv(index=False).encode("utf-8")
     st.download_button(
-        label="Download selected timestamp prediction as CSV",
-        data=step_csv,
-        file_name="selected_timestamp_prediction.csv",
+        label="Download recursive future forecast as CSV",
+        data=recursive_csv,
+        file_name="recursive_future_forecast.csv",
         mime="text/csv"
     )
 
