@@ -1,8 +1,8 @@
-streamlit==1.37.1
-torch==2.3.1
-pandas==2.2.2
-numpy==1.26.4
-scikit-learn==1.5.1
-tables==3.9.2
-plotly==5.23.0
-h5py==3.11.0
+streamlit
+torch
+pandas
+numpy
+scikit-learn
+tables
+plotly
+h5py
