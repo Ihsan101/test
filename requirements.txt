@@ -1,5 +1,5 @@
-streamlit
-torch
+streamlit==1.55.0
+torch==2.10.0
 pandas
 numpy
 scikit-learn
